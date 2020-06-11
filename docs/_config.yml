@@ -1,4 +1,3 @@
-title:
-logo: mhdb.png
+title: MHdb
 description: Rust rewrite of dbm.
 theme: jekyll-theme-minimal
