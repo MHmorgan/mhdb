@@ -1,3 +1,1 @@
-# MHdb
-
-Rust rewrite of unix [dbm](https://en.wikipedia.org/wiki/DBM_(computing)).
+MHdb is a Rust rewrite of dbm.
