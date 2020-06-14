@@ -5,3 +5,7 @@ authors = ["mhmorgan <mhmorgan42@gmail.com>"]
 edition = "2018"
 
 [dependencies]
+
+[dev-dependencies]
+serde = { version = "1.0.111", features = ["derive"] }
+bincode = "1.2.1"

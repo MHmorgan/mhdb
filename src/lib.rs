@@ -1,15 +1,92 @@
-//! MHdb is a pure Rust key-value store database, based on
-//! [dbm](https://en.wikipedia.org/wiki/DBM_(computing)).
+//! [MHdb](https://mhmorgan.github.io/mhdb/) is a pure Rust key-value store
+//! database, based on [dbm](https://en.wikipedia.org/wiki/DBM_(computing)).
 //! 
 //! # Simple use
 //! 
+//! ```no_run
+//! # fn main() -> Result<(), Box<dyn std::error::Error>> {
+//! use mhdb::{Db, prelude::*};
+//! 
+//! let mut db = Db::open("mydb")?;
+//! db.store(42u8, "Hello world")?;
+//! let txt: Option<String> = db.fetch(42u8)?;
+//! assert!(txt.is_some());
+//! println!("{}", txt.unwrap());
+//! # Ok(())
+//! # }
+//! ```
+//! 
+//! Any type which implement [`Datum`] can be stored in the
+//! database. Most primitive types implement [`Datum`].
+//! 
 //! # In-memory database
 //! 
-//! # Datum
+//! Any type which implements the [`Source`] trait can be used
+//! as database sources. This trait is in turn automatically
+//! implemented for any type which implements the [`Read`],
+//! [`Write`], and [`Seek`] standard library traits.
+//! 
+//! ```
+//! # fn main() -> Result<(), Box<dyn std::error::Error>> {
+//! use mhdb::{Db, prelude::*};
+//! use std::io::Cursor;
+//!
+//! let dirf = Cursor::new(Vec::<u8>::new());
+//! let pagf = Cursor::new(Vec::<u8>::new());
+//! let mut db: Db = Db::with_sources(Box::new(pagf), Box::new(dirf))?;
+//! 
+//! db.store(42u8, "Hello world")?;
+//! let txt: Option<String> = db.fetch(42u8)?;
+//! assert!(txt.is_some());
+//! println!("{}", txt.unwrap());
+//! # Ok(())
+//! # }
+//! ```
 //! 
 //! # Serde with custom types
 //! 
+//! [Serde] makes it easier to serialize and deserialize custom
+//! data types.
+//! 
+//! ```
+//! extern crate serde;
+//! extern crate bincode;
+//! 
+//! use mhdb::{Db, prelude::*};
+//! use serde::{Serialize,Deserialize};
+//! use std::io::Cursor;
+//! 
+//! #[derive(Serialize, Deserialize, Debug, PartialEq, Eq)]
+//! struct Point(i32, i32);
+//! 
+//! fn main() -> Result<(), Box<dyn std::error::Error>> {
+//!     let dirf = Cursor::new(Vec::<u8>::new());
+//!     let pagf = Cursor::new(Vec::<u8>::new());
+//!     let mut db: Db = Db::with_sources(Box::new(pagf), Box::new(dirf))?;
+//! 
+//!     let p = Point(-4, 8);
+//!     let val: Vec<u8> = bincode::serialize(&p)?;
+//!     db.store("point", val)?;
+//! 
+//!     let val: Vec<u8> = db.fetch("point")?.unwrap();
+//!     let p0: Point = bincode::deserialize(&val)?;
+//!     assert_eq!(p, p0);
+//!     Ok(())
+//! }
+//! ```
+//! 
 //! # Limitations
+//! 
+//! * Key-value pairs can not be larger than 506MB
+//! * Not thread safe
+//! 
+//! [`Db`]: struct.Db.html
+//! [`Source`]: traits.Source.html
+//! [`Datum`]: traits.Datum.html
+//! [`Read`]: https://doc.rust-lang.org/std/io/trait.Read.html
+//! [`Write`]: https://doc.rust-lang.org/std/io/trait.Write.html
+//! [`Seek`]: https://doc.rust-lang.org/std/io/trait.Seek.html
+//! [Serde]: https://serde.rs/
 
 // pag file contains blocks of PBLKSIZ size
 //
@@ -240,7 +317,7 @@ impl Db {
                 }
             }
 
-            if (key.len() + val.len() + 2*2) >= PBLKSIZ {
+            if (key.len() + val.len() + 2*3) >= PBLKSIZ {
                 bail!(Error::TooBig);
             }
             let mut ovfbuf = [0u8; PBLKSIZ];
@@ -739,18 +816,14 @@ pub trait Source : Write + Read + Seek {}
 
 impl<S: Write + Read + Seek> Source for S {}
 
+/// Errors returned by database operations.
 #[derive(Debug)]
 pub enum Error {
-    /// Content of a block is corrupted.
     BadBlock(Option<String>),
     BadValue(Option<String>),
-    /// Data overflow happens when trying to add an item to a block which
-    /// doesn't have enough available space to fit the data.
     DataOverflow(Option<String>),
     NoExist(Option<String>),
-    /// Key-value pair is too big to fit in a block.
     TooBig(Option<String>),
-    /// Found unpaired key-val in block
     Unpaired(Option<String>),
 }
 
@@ -782,6 +855,68 @@ impl StdError for Error {}
  *                                                                             *
  *******************************************************************************/
 
+/// Storable types must implement `Datum`.
+/// 
+/// `Datum` is implemented on most primitive types. 
+/// 
+/// ```
+/// use mhdb::{Db, prelude::*};
+/// use std::io::Cursor;
+/// 
+/// struct Point(i32, i32);
+/// 
+/// impl Datum for Point {
+///     fn datum(&self) -> Result<Vec<u8>, Box<dyn std::error::Error>> {
+///         let mut v = self.0.datum()?;
+///         v.extend_from_slice(&self.1.datum()?);
+///         Ok(v)
+///     }
+/// }
+/// 
+/// fn main() -> Result<(), Box<dyn std::error::Error>> {
+///     let dirf = Cursor::new(Vec::<u8>::new());
+///     let pagf = Cursor::new(Vec::<u8>::new());
+///     let mut db: Db = Db::with_sources(Box::new(pagf), Box::new(dirf))?;
+/// 
+///     let p = Point(-4, 8);
+///     db.store("point", p)?;
+///     Ok(())
+/// }
+/// ```
+/// 
+/// There is no similar way for retrieving user defined data types.
+/// 
+/// *Tip:* [Serde] makes it easier to serialize and deserialize
+/// structs and enums.
+/// 
+/// ```
+/// extern crate serde;
+/// extern crate bincode;
+/// 
+/// use mhdb::{Db, prelude::*};
+/// use serde::{Serialize,Deserialize};
+/// use std::io::Cursor;
+/// 
+/// #[derive(Serialize, Deserialize, Debug, PartialEq, Eq)]
+/// struct Point(i32, i32);
+/// 
+/// fn main() -> Result<(), Box<dyn std::error::Error>> {
+///     let dirf = Cursor::new(Vec::<u8>::new());
+///     let pagf = Cursor::new(Vec::<u8>::new());
+///     let mut db: Db = Db::with_sources(Box::new(pagf), Box::new(dirf))?;
+/// 
+///     let p = Point(-4, 8);
+///     let val: Vec<u8> = bincode::serialize(&p)?;
+///     db.store("point", val)?;
+/// 
+///     let val: Vec<u8> = db.fetch("point")?.unwrap();
+///     let p0: Point = bincode::deserialize(&val)?;
+///     assert_eq!(p, p0);
+///     Ok(())
+/// }
+/// ```
+/// 
+/// [Serde]: https://serde.rs/
 pub trait Datum {
     fn datum(&self) -> Result<Vec<u8>>;
 }
@@ -901,6 +1036,7 @@ impl Datum for f64 {
  *                                                                             *
  *******************************************************************************/
 
+/// Internal trait to allow fetching of most primitive types.
 pub trait Fetcher<T> {
     fn fetch(&mut self, key: impl Datum) -> Result<Option<T>>;
 }
