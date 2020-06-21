@@ -99,9 +99,6 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-extern crate serde;
-extern crate bincode;
-
 use std::cmp;
 use std::error::Error as StdError;
 use std::fmt::{self, Debug};
@@ -141,7 +138,7 @@ struct PagCache {
 impl PagCache {
     fn new(src: Box<dyn Source>) -> Self {
         PagCache {
-            src: src,
+            src,
             buf: [0; PBLKSIZ],
             blkno: !0,
         }
@@ -151,13 +148,11 @@ impl PagCache {
         use io::SeekFrom::Start;
         if self.blkno != blkno || self.blkno == !0 {
             self.src.seek(Start(blkno * (PBLKSIZ as u64)))?;
-            self.src.read(&mut self.buf[..])?;
+            let _ = self.src.read(&mut self.buf[..])?;
             self.blkno = blkno;
         }
         let mut buf = [0; PBLKSIZ];
-        for i in 0..PBLKSIZ {
-            buf[i] = self.buf[i];
-        }
+        buf[..PBLKSIZ].clone_from_slice(&self.buf[..PBLKSIZ]);
         Ok(buf)
     }
 
@@ -166,9 +161,7 @@ impl PagCache {
         self.src.seek(Start(blkno * (PBLKSIZ as u64)))?;
         self.src.write_all(buf)?;
         self.blkno = blkno;
-        for i in 0..PBLKSIZ {
-            self.buf[i] = buf[i];
-        }
+        self.buf[..PBLKSIZ].clone_from_slice(&buf[..PBLKSIZ]);
         Ok(())
     }
 }
@@ -184,7 +177,7 @@ impl DirCache {
     fn new(src: Box<dyn Source>) -> io::Result<Self> {
         use io::SeekFrom::End;
         let mut dir = DirCache {
-            src: src,
+            src,
             buf: [0; DBLKSIZ],
             blkno: !0,
             maxbno: 0,
@@ -199,11 +192,9 @@ impl DirCache {
     fn read(&mut self, blkno: u64) -> io::Result<()> {
         use io::SeekFrom::Start;
         if self.blkno != blkno || self.blkno == !0 {
-            for i in 0..DBLKSIZ {
-                self.buf[i] = 0;
-            }
+            self.buf[..DBLKSIZ].clone_from_slice(&[0; DBLKSIZ]);
             self.src.seek(Start(blkno * (DBLKSIZ as u64)))?;
-            self.src.read(&mut self.buf[..])?;
+            let _ = self.src.read(&mut self.buf[..])?;
             self.blkno = blkno;
         }
         Ok(())
@@ -717,7 +708,7 @@ fn chkblk(buf: &[u8; PBLKSIZ]) -> DbResult<()> {
 
     // Check overlap of index area and item area
     if t < (lastidx + 1)*2 {
-        return Err(Error::BadBlock)
+        Err(Error::BadBlock)
     } else {
         Ok(())
     }
