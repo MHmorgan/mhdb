@@ -11,6 +11,14 @@ See [crate documentation](https://docs.rs/mhdb/).
 
 ## Changelog
 
-### v1.0
+### v1.0.2
+
+* Update Cargo.tom
+
+### v1.0.1
+
+* Update docs
+
+### v1.0.0
 
 * Initial release
