@@ -59,7 +59,7 @@
 //! 
 //! # Limitations
 //! 
-//! * Key-value pairs can not be larger than 506kB
+//! * Key-value pairs can not be larger than 506B
 //! * [`Db`] objects are not thread safe
 //! 
 //! [`Db`]: struct.Db.html
@@ -308,7 +308,7 @@ impl Db {
     /// # Errors
     /// 
     /// If converting the key or value to bytes fails, or if the key-value pair
-    /// is larger than 506kB, an error variant will be returned.
+    /// is larger than 506B, an error variant will be returned.
     /// 
     /// [`Datum`]: trait.Datum.html
     /// [`Serialize`]: https://docs.serde.rs/serde/trait.Serialize.html
