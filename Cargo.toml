@@ -1,6 +1,6 @@
 [package]
 name = "mhdb"
-version = "1.0.1"
+version = "1.0.2"
 authors = ["mhmorgan <mhmorgan42@gmail.com>"]
 edition = "2018"
 license = "Apache-2.0"
@@ -8,6 +8,7 @@ homepage = "https://crates.io/crates/mhdb"
 repository = "https://github.com/mhmorgan/mhdb"
 readme = "README.md"
 description = "Pure rust embeddable key-value store database."
+documentation = "https://docs.rs/mhdb/"
 
 [lib]
 name = "mhdb"
