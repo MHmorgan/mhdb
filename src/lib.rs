@@ -1,5 +1,5 @@
-//! [MHdb](https://mhmorgan.github.io/mhdb/) is a pure Rust key-value store
-//! database, based on [dbm](https://en.wikipedia.org/wiki/DBM_(computing)).
+//! [MHdb](https://mhmorgan.github.io/mhdb/) is a pure Rust embedded key-value
+//! store database, based on [dbm](https://en.wikipedia.org/wiki/DBM_(computing)).
 //! 
 //! # Simple use
 //! 
@@ -8,7 +8,7 @@
 //! use mhdb::{Db, prelude::*};
 //! 
 //! let mut db = Db::open("mydb")?;
-//! db.store(42u8, "Hello world")?;
+//! db.store(42u8, "Hello world".to_owned())?;
 //! let txt: Option<String> = db.fetch(42u8)?;
 //! assert!(txt.is_some());
 //! println!("{}", txt.unwrap());
@@ -16,15 +16,24 @@
 //! # }
 //! ```
 //! 
-//! Any type which implement [`Datum`] can be stored in the
-//! database. Most primitive types implement [`Datum`].
+//! Any type implementing [`Datum`] can be stored in the database.
+//! 
+//! # Datum
+//! 
+//! A datum represents a single item in the database. Types
+//! used as keys and/or values must therefore implement the
+//! [`Datum`] trait.
+//! 
+//! [`Datum`] is automatically implemented on any type implementing
+//! the [Serde] traits [`Serialize`] and [`Deserialize`].
 //! 
 //! # In-memory database
 //! 
 //! Any type which implements the [`Source`] trait can be used
 //! as database sources. This trait is in turn automatically
 //! implemented for any type which implements the [`Read`],
-//! [`Write`], and [`Seek`] standard library traits.
+//! [`Write`], [`Seek`], and [`Debug`] standard library traits.
+//! A vector may therefore be used as an in-memory database.
 //! 
 //! ```
 //! # fn main() -> Result<(), Box<dyn std::error::Error>> {
@@ -35,44 +44,12 @@
 //! let pagf = Cursor::new(Vec::<u8>::new());
 //! let mut db: Db = Db::with_sources(Box::new(pagf), Box::new(dirf))?;
 //! 
-//! db.store(42u8, "Hello world")?;
+//! db.store(42u8, "Hello world".to_owned())?;
 //! let txt: Option<String> = db.fetch(42u8)?;
 //! assert!(txt.is_some());
 //! println!("{}", txt.unwrap());
 //! # Ok(())
 //! # }
-//! ```
-//! 
-//! # Serde with custom types
-//! 
-//! [Serde] makes it easier to serialize and deserialize custom
-//! data types.
-//! 
-//! ```
-//! extern crate serde;
-//! extern crate bincode;
-//! 
-//! use mhdb::{Db, prelude::*};
-//! use serde::{Serialize,Deserialize};
-//! use std::io::Cursor;
-//! 
-//! #[derive(Serialize, Deserialize, Debug, PartialEq, Eq)]
-//! struct Point(i32, i32);
-//! 
-//! fn main() -> Result<(), Box<dyn std::error::Error>> {
-//!     let dirf = Cursor::new(Vec::<u8>::new());
-//!     let pagf = Cursor::new(Vec::<u8>::new());
-//!     let mut db: Db = Db::with_sources(Box::new(pagf), Box::new(dirf))?;
-//! 
-//!     let p = Point(-4, 8);
-//!     let val: Vec<u8> = bincode::serialize(&p)?;
-//!     db.store("point", val)?;
-//! 
-//!     let val: Vec<u8> = db.fetch("point")?.unwrap();
-//!     let p0: Point = bincode::deserialize(&val)?;
-//!     assert_eq!(p, p0);
-//!     Ok(())
-//! }
 //! ```
 //! 
 //! # Limitations
@@ -86,7 +63,10 @@
 //! [`Read`]: https://doc.rust-lang.org/std/io/trait.Read.html
 //! [`Write`]: https://doc.rust-lang.org/std/io/trait.Write.html
 //! [`Seek`]: https://doc.rust-lang.org/std/io/trait.Seek.html
+//! [`Debug`]: https://doc.rust-lang.org/std/fmt/trait.Debug.html
 //! [Serde]: https://serde.rs/
+//! [`Serialize`]: https://docs.serde.rs/serde/trait.Serialize.html
+//! [`Deserialize`]: https://docs.serde.rs/serde/trait.Deserialize.html
 
 // pag file contains blocks of PBLKSIZ size
 //
@@ -112,15 +92,21 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
+extern crate serde;
+extern crate bincode;
+
 use std::cmp;
 use std::error::Error as StdError;
+use std::result::Result as StdResult;
 use std::fmt;
-use std::ffi::{CStr, CString};
 use std::fs;
 use std::io::{self, prelude::*};
 use std::path::Path;
 
-type Result<T> = std::result::Result<T, Box<dyn StdError + 'static>>;
+#[cfg(feature = "std")]
+use serde::{Serialize, de::DeserializeOwned};
+
+type Result<T> = StdResult<T, Error>;
 
 const PBLKSIZ: usize = 512;  /* bytes */
 const DBLKSIZ: usize = 8192; /* bits  */
@@ -134,7 +120,7 @@ macro_rules! ppos {
 
 macro_rules! bail {
     ($err:expr) => {
-        return Err(Box::new($err(None)))
+        return Err($err)
     };
     ($err:expr, $($arg:tt)+) => {
         return Err(Box::new($err(Some(format!($($arg)+)))))
@@ -152,64 +138,21 @@ macro_rules! bail {
 /// 
 /// [`Db`]: struct.Db.html
 pub mod prelude {
-    pub use super::{Datum, Fetcher, Source};
+    pub use super::{Datum, Source};
 }
 
-/// Database object.
+/// The database object. All interraction with mhdb databases is
+/// done through this object.
 /// 
-/// # Simple use
-/// 
-/// ```no_run
-/// # fn main() -> Result<(), Box<dyn std::error::Error>> {
-/// use mhdb::{Db, prelude::*};
-/// 
-/// let mut db = Db::open("mydb")?;
-/// db.store(42u8, "Hello world")?;
-/// let txt: Option<String> = db.fetch(42u8)?;
-/// assert!(txt.is_some());
-/// println!("{}", txt.unwrap());
-/// # Ok(())
-/// # }
-/// ```
-/// 
-/// This opens _mydb_ database, which is stored in the files:
-/// *mydb.pag* and *mydb.dir*.
-/// 
-/// # In-memory
-/// 
-/// Any type which implements the [`Source`] trait can be used
-/// as database sources. This trait is in turn automatically
-/// implemented for any type which implements the [`Read`],
-/// [`Write`], and [`Seek`] standard library traits.
-/// 
-/// ```
-/// # fn main() -> Result<(), Box<dyn std::error::Error>> {
-/// use mhdb::{Db, prelude::*};
-/// use std::io::Cursor;
-///
-/// let dirf = Cursor::new(Vec::<u8>::new());
-/// let pagf = Cursor::new(Vec::<u8>::new());
-/// let mut db: Db = Db::with_sources(Box::new(pagf), Box::new(dirf))?;
-/// 
-/// db.store(42u8, "Hello world")?;
-/// let txt: Option<String> = db.fetch(42u8)?;
-/// assert!(txt.is_some());
-/// println!("{}", txt.unwrap());
-/// # Ok(())
-/// # }
-/// ```
+/// See [crate documentation](index.html) for examples.
 /// 
 /// [`Source`]: traits.Source.html
 /// [`Read`]: https://doc.rust-lang.org/std/io/trait.Read.html
 /// [`Write`]: https://doc.rust-lang.org/std/io/trait.Write.html
 /// [`Seek`]: https://doc.rust-lang.org/std/io/trait.Seek.html
-// TODO: implement Debug for Db (and other common traits)
 pub struct Db {
     // Keys and data are stored in the .pag file, in pairs.
     pagf: Box<dyn Source>,
-
-    // .dir file is accessed by single bits. A bit value of 1 indicates that
-    // a specific block is already used.
     dirf: Box<dyn Source>,
 
     pagbuf: [u8; PBLKSIZ],
@@ -223,21 +166,32 @@ pub struct Db {
     olddirb: Option<u64>,
 }
 
+impl std::fmt::Debug for Db {
+    fn fmt(&self, f: &mut std::fmt::Formatter) -> std::fmt::Result {
+        write!(f, "<Db, {:?}>", self.pagf)
+    }
+}
+
 impl Db {
-    /// Open a database, creating the files _<name>.dir_ and _<name>.pag_
+    /// Open a database, creating the files _\<name\>.dir_ and _\<name\>.pag_
     /// unless they already exist.
-    pub fn open(name: &str) -> Result<Db> {
+    /// 
+    /// # Errors
+    /// 
+    /// `open` may return an error if an I/O error is encountered.
+    /// 
+    pub fn open(name: &str) -> StdResult<Db, io::Error> {
         let path: &Path = name.as_ref();
         let pagsrc = fs::OpenOptions::new()
             .create(true)
             .write(true)
             .read(true)
-            .open(path.with_extension(".pag"))?;
+            .open(path.with_extension("pag"))?;
         let dirsrc = fs::OpenOptions::new()
             .create(true)
             .write(true)
             .read(true)
-            .open(path.with_extension(".dir"))?;
+            .open(path.with_extension("dir"))?;
         Db::with_sources(Box::new(pagsrc), Box::new(dirsrc))
     }
 
@@ -246,7 +200,10 @@ impl Db {
     /// Any type implementing [`Source`] can be provided as source.
     /// 
     /// [`Source`]: trait.Source.html
-    pub fn with_sources(pagsrc: Box<dyn Source>, dirsrc: Box<dyn Source>) -> Result<Db> {
+    pub fn with_sources(
+        pagsrc: Box<dyn Source>,
+        dirsrc: Box<dyn Source>
+    ) -> StdResult<Db, io::Error> {
         use io::SeekFrom::End;
         let mut db = Db {
             pagf: pagsrc,
@@ -266,12 +223,20 @@ impl Db {
     /// Store a key in the database.
     /// 
     /// Any type implementing [`Datum`] may be provided as `key` and `val`.
-    /// [`Datum`] is implemented on most of the primitive types.
+    /// [`Datum`] is implemented on any type implementing [`Serialize`] and
+    /// [`Deserialize`].
+    /// 
+    /// # Errors
+    /// 
+    /// If converting the key or value to bytes fails, or if the key-value pair
+    /// is larger than 512MB, an error variant will be returned.
     /// 
     /// [`Datum`]: trait.Datum.html
+    /// [`Serialize`]: https://docs.serde.rs/serde/trait.Serialize.html
+    /// [`Deserialize`]: https://docs.serde.rs/serde/trait.Deserialize.html
     pub fn store(&mut self, key: impl Datum, val: impl Datum) -> Result<()> {
-        let key = key.datum()?;
-        let val = val.datum()?;
+        let key = key.to_datum().map_err(|e| Error::DatumError(e))?;
+        let val = val.to_datum().map_err(|e| Error::DatumError(e))?;
         self._store(&key, &val)
     }
 
@@ -318,7 +283,7 @@ impl Db {
             }
 
             if (key.len() + val.len() + 2*3) >= PBLKSIZ {
-                bail!(Error::TooBig);
+                bail!(Error::PairTooBig);
             }
             let mut ovfbuf = [0u8; PBLKSIZ];
 
@@ -351,6 +316,63 @@ impl Db {
         }
 
         Ok(())
+    }
+
+    /// Fetch a key from the database. If the key doesn't exist
+    /// None is returned instead.
+    /// 
+    /// The value is deserialized before it is returned.
+    /// The database doesn't remember types, and apart from
+    /// checking that deserialization doesn't fail, no type
+    /// checking is performed.
+    /// 
+    /// The following two examples may therefore return a value,
+    /// without errors, but only one would be correct:
+    /// 
+    /// ```
+    /// # fn main() -> Result<(), Box<dyn std::error::Error>> {
+    /// # use mhdb::{Db, prelude::*};
+    /// # use std::io::Cursor;
+    /// # let dirf = Cursor::new(Vec::<u8>::new());
+    /// # let pagf = Cursor::new(Vec::<u8>::new());
+    /// # let mut db: Db = Db::with_sources(Box::new(pagf), Box::new(dirf))?;
+    /// let key = "myint".to_owned();
+    /// # db.store(key.clone(), 42u64)?;
+    /// let num: Option<u64> = db.fetch(key)?;
+    /// # assert!(num.is_some() && num.unwrap() == 42);
+    /// # Ok(())
+    /// # }
+    /// ```
+    /// 
+    /// ```
+    /// # fn main() -> Result<(), Box<dyn std::error::Error>> {
+    /// # use mhdb::{Db, prelude::*};
+    /// # use std::io::Cursor;
+    /// # let dirf = Cursor::new(Vec::<u8>::new());
+    /// # let pagf = Cursor::new(Vec::<u8>::new());
+    /// # let mut db: Db = Db::with_sources(Box::new(pagf), Box::new(dirf))?;
+    /// let key = "myint".to_owned();
+    /// # db.store(key.clone(), 42u64)?;
+    /// let num: Option<f64> = db.fetch(key)?;
+    /// # assert!(num.is_some());
+    /// # Ok(())
+    /// # }
+    /// ```
+    /// 
+    /// # Errors
+    /// 
+    /// If converting the key to bytes fails, an error variant will be returned.
+    /// 
+    pub fn fetch<T: Datum>(&mut self, key: impl Datum) -> Result<Option<T>> {
+        let key = key.to_datum().map_err(|e| Error::DatumError(e))?;
+        let val = self._fetch(&key)?;
+        match val {
+            None => Ok(None),
+            Some(b) => {
+                let val = T::from_datum(b).map_err(|e| Error::DatumError(e))?;
+                Ok(Some(val))
+            }
+        }
     }
 
     fn _fetch(&mut self, key: &[u8]) -> Result<Option<Vec<u8>>> {
@@ -389,10 +411,14 @@ impl Db {
 
     /// Delete a key from the database.
     /// 
-    /// If the key doesn't exist in the database false is returned.
+    /// If the key doesn't exist false is returned.
+    /// 
+    /// # Errors
+    /// 
+    /// If converting the key to bytes fails, an error variant will be returned.
     /// 
     pub fn delete(&mut self, key: impl Datum) -> Result<bool> {
-        let key = key.datum()?;
+        let key = key.to_datum().map_err(|e| Error::DatumError(e))?;
         self._delete(&key)
     }
 
@@ -615,7 +641,7 @@ impl Db {
 
     /// Check if a key exists in the database.
     pub fn contains(&mut self, key: impl Datum) -> Result<bool> {
-        let key = key.datum()?;
+        let key = key.to_datum().map_err(|e| Error::DatumError(e))?;
         let res = self._fetch(&key)?;
         Ok(res.is_some())
     }
@@ -812,42 +838,47 @@ fn set16(buf: &mut [u8; PBLKSIZ], n: usize, val: usize) {
 /// 
 /// [`File`]: https://doc.rust-lang.org/std/fs/struct.File.html
 /// [`Cursor`]: https://doc.rust-lang.org/std/io/struct.Cursor.html
-pub trait Source : Write + Read + Seek {}
+pub trait Source : Write + Read + Seek + std::fmt::Debug {}
 
-impl<S: Write + Read + Seek> Source for S {}
+impl<S: Write + Read + Seek + std::fmt::Debug> Source for S {}
+
+type BoxError = Box<dyn StdError + Sync + Send>;
 
 /// Errors returned by database operations.
 #[derive(Debug)]
 pub enum Error {
-    BadBlock(Option<String>),
-    BadValue(Option<String>),
-    DataOverflow(Option<String>),
-    NoExist(Option<String>),
-    TooBig(Option<String>),
-    Unpaired(Option<String>),
+    BadBlock,
+    BadValue,
+    DataOverflow,
+    NoExist,
+    PairTooBig,
+    Unpaired,
+    DatumError(BoxError),
+    IoError(io::Error),
+    /// A propagated error
+    Unknown(BoxError)
 }
 
 impl fmt::Display for Error {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        use Error::*;
+        write!(f, "{:?}", self)
+    }
+}
+
+impl StdError for Error {
+    fn source(&self) -> Option<&(dyn StdError + 'static)> {
         match self {
-            BadBlock(None)          => write!(f, "bad block"),
-            BadBlock(Some(msg))     => write!(f, "bad block: {}", msg),
-            BadValue(None)          => write!(f, "bad value"),
-            BadValue(Some(msg))     => write!(f, "bad value: {}", msg),
-            DataOverflow(None)      => write!(f, "block data overflow"),
-            DataOverflow(Some(msg)) => write!(f, "block data overflow: {}", msg),
-            NoExist(None)           => write!(f, "item doesn't exist"),
-            NoExist(Some(msg))      => write!(f, "item doesn't exist: {}", msg),
-            TooBig(None)            => write!(f, "key-val pair too big"),
-            TooBig(Some(msg))       => write!(f, "key-val pair too big: {}", msg),
-            Unpaired(None)          => write!(f, "unpaired key-val in block"),
-            Unpaired(Some(msg))     => write!(f, "unpaired key-val in block: {}", msg),
+            Error::Unknown(src) => Some(src.as_ref()),
+            _ => None,
         }
     }
 }
 
-impl StdError for Error {}
+impl From<io::Error> for Error {
+    fn from(err: io::Error) -> Self {
+        Error::IoError(err)
+    }
+}
 
 /*******************************************************************************
  *                                                                             *
@@ -855,140 +886,101 @@ impl StdError for Error {}
  *                                                                             *
  *******************************************************************************/
 
-/// Storable types must implement `Datum`.
+/// A datum represents a single item in the database. Any type used as
+/// key or value needs to implement `Datum`.
 /// 
-/// `Datum` is implemented on most primitive types. 
+/// Any type implementing [`Serialize`] and [`Deserialize`] also
+/// implements `Datum`.
 /// 
-/// ```
-/// use mhdb::{Db, prelude::*};
-/// use std::io::Cursor;
-/// 
-/// struct Point(i32, i32);
-/// 
-/// impl Datum for Point {
-///     fn datum(&self) -> Result<Vec<u8>, Box<dyn std::error::Error>> {
-///         let mut v = self.0.datum()?;
-///         v.extend_from_slice(&self.1.datum()?);
-///         Ok(v)
-///     }
-/// }
-/// 
-/// fn main() -> Result<(), Box<dyn std::error::Error>> {
-///     let dirf = Cursor::new(Vec::<u8>::new());
-///     let pagf = Cursor::new(Vec::<u8>::new());
-///     let mut db: Db = Db::with_sources(Box::new(pagf), Box::new(dirf))?;
-/// 
-///     let p = Point(-4, 8);
-///     db.store("point", p)?;
-///     Ok(())
-/// }
-/// ```
-/// 
-/// There is no similar way for retrieving user defined data types.
-/// 
-/// *Tip:* [Serde] makes it easier to serialize and deserialize
-/// structs and enums.
-/// 
-/// ```
-/// extern crate serde;
-/// extern crate bincode;
-/// 
-/// use mhdb::{Db, prelude::*};
-/// use serde::{Serialize,Deserialize};
-/// use std::io::Cursor;
-/// 
-/// #[derive(Serialize, Deserialize, Debug, PartialEq, Eq)]
-/// struct Point(i32, i32);
-/// 
-/// fn main() -> Result<(), Box<dyn std::error::Error>> {
-///     let dirf = Cursor::new(Vec::<u8>::new());
-///     let pagf = Cursor::new(Vec::<u8>::new());
-///     let mut db: Db = Db::with_sources(Box::new(pagf), Box::new(dirf))?;
-/// 
-///     let p = Point(-4, 8);
-///     let val: Vec<u8> = bincode::serialize(&p)?;
-///     db.store("point", val)?;
-/// 
-///     let val: Vec<u8> = db.fetch("point")?.unwrap();
-///     let p0: Point = bincode::deserialize(&val)?;
-///     assert_eq!(p, p0);
-///     Ok(())
-/// }
-/// ```
-/// 
-/// [Serde]: https://serde.rs/
-pub trait Datum {
-    fn datum(&self) -> Result<Vec<u8>>;
+/// [`Serialize`]: https://docs.serde.rs/serde/trait.Serialize.html
+/// [`Deserialize`]: https://docs.serde.rs/serde/trait.Deserialize.html
+pub trait Datum: Sized {
+    fn to_datum(&self) -> StdResult<Vec<u8>, BoxError>;
+    fn from_datum(b: Vec<u8>) -> StdResult<Self, BoxError>;
 }
 
-impl<T: Datum> Datum for &T {
-    fn datum(&self) -> Result<Vec<u8>> {
-        (*self).datum()
+#[cfg(feature = "std")]
+impl<T: Serialize + DeserializeOwned> Datum for T {
+    fn to_datum(&self) -> StdResult<Vec<u8>, BoxError> {
+        let val = bincode::serialize(self)?;
+        Ok(val)
+    }
+
+    fn from_datum(b: Vec<u8>) -> StdResult<Self, BoxError> {
+        let val = bincode::deserialize(&b)?;
+        Ok(val)
     }
 }
 
-impl<T: Datum> Datum for Vec<T> {
-    fn datum(&self) -> Result<Vec<u8>> {
-        let mut v = Vec::new();
-        for d in self.iter() {
-            let b = d.datum()?;
-            v.extend_from_slice(&b);
-        }
-        Ok(v)
+#[cfg(not(feature = "std"))]
+impl Datum for Vec<u8> {
+    fn to_datum(&self) -> Result<Vec<u8>, Box<dyn StdError + Sync + Send>> {
+        Ok(self.clone())
+    }
+
+    fn from_datum(b: Vec<u8>) -> Result<Self, Box<dyn StdError + Sync + Send>> {
+        Ok(b)
     }
 }
 
-impl<T: Datum> Datum for [T] {
-    fn datum(&self) -> Result<Vec<u8>> {
-        let mut v = Vec::new();
-        for d in self.iter() {
-            let b = d.datum()?;
-            v.extend_from_slice(&b);
-        }
-        Ok(v)
-    }
-}
-
-impl Datum for &str {
-    fn datum(&self) -> Result<Vec<u8>> {
-        Ok((*self).into())
-    }
-}
-
+#[cfg(not(feature = "std"))]
 impl Datum for String {
-    fn datum(&self) -> Result<Vec<u8>> {
+    fn to_datum(&self) -> Result<Vec<u8>, Box<dyn StdError + Sync + Send>> {
         Ok(self.as_bytes().into())
     }
-}
 
-impl Datum for CStr {
-    fn datum(&self) -> Result<Vec<u8>> {
-        Ok(self.to_bytes().into())
+    fn from_datum(b: Vec<u8>) -> Result<Self, Box<dyn StdError + Sync + Send>> {
+        let s = String::from_utf8(b)?;
+        Ok(s)
     }
 }
 
+#[cfg(not(feature = "std"))]
 impl Datum for CString {
-    fn datum(&self) -> Result<Vec<u8>> {
-        Ok(self.to_bytes().into())
+    fn to_datum(&self) -> Result<Vec<u8>, Box<dyn StdError + Sync + Send>> {
+        let v: Vec<u8> = self.to_bytes().into();
+        Ok(v)
+    }
+
+    fn from_datum(b: Vec<u8>) -> Result<Self, Box<dyn StdError + Sync + Send>> {
+        let s = CString::new(b)?;
+        Ok(s)
     }
 }
 
+#[cfg(not(feature = "std"))]
 impl Datum for u8 {
-    fn datum(&self) -> Result<Vec<u8>> {
+    fn to_datum(&self) -> Result<Vec<u8>, Box<dyn StdError + Sync + Send>> {
         Ok(vec![*self])
     }
-}
 
-impl Datum for i8 {
-    fn datum(&self) -> Result<Vec<u8>> {
-        Ok(vec![*self as u8])
+    fn from_datum(b: Vec<u8>) -> Result<Self, Box<dyn StdError + Sync + Send>> {
+        if b.len() != 1 {
+            bail!(Error::BadValue);
+        }
+        Ok(b[0])
     }
 }
 
+#[cfg(not(feature = "std"))]
+impl Datum for i8 {
+    fn to_datum(&self) -> Result<Vec<u8>, Box<dyn StdError + Sync + Send>> {
+        Ok(vec![*self as u8])
+    }
+
+    fn from_datum(b: Vec<u8>) -> Result<Self, Box<dyn StdError + Sync + Send>> {
+        if b.len() != 1 {
+            bail!(Error::BadValue);
+        }
+        Ok(b[0] as i8)
+    }
+}
+
+#[cfg(not(feature = "std"))]
 macro_rules! num_datum {
     ($type:ty, $n:expr) => {
         impl Datum for $type {
-            fn datum(&self) -> Result<Vec<u8>> {
+            fn to_datum(&self) -> Result<Vec<u8>, Box<dyn StdError + Sync + Send>> {
                 let mut v = Vec::new();
                 let mut n = *self;
                 for _ in 0..$n {
@@ -997,176 +989,76 @@ macro_rules! num_datum {
                 }
                 Ok(v)
             }
+
+            fn from_datum(b: Vec<u8>) -> Result<Self, Box<dyn StdError + Sync + Send>> {
+                if b.len() != $n {
+                    bail!(Error::BadValue);
+                }
+                let mut num: $type = 0;
+                for i in 1..=$n {
+                    num <<= 8;
+                    num |= b[$n-i] as $type;
+                }
+                Ok(num)
+            }
         }
     };
 }
 
-num_datum!(u16, 2);
-num_datum!(u32, 4);
-num_datum!(u64, 8);
-num_datum!(u128, 16);
-num_datum!(i16, 2);
-num_datum!(i32, 4);
-num_datum!(i64, 8);
-num_datum!(i128, 16);
+#[cfg(not(feature = "std"))] num_datum!(u16, 2);
+#[cfg(not(feature = "std"))] num_datum!(u32, 4);
+#[cfg(not(feature = "std"))] num_datum!(u64, 8);
+#[cfg(not(feature = "std"))] num_datum!(u128, 16);
+#[cfg(not(feature = "std"))] num_datum!(i16, 2);
+#[cfg(not(feature = "std"))] num_datum!(i32, 4);
+#[cfg(not(feature = "std"))] num_datum!(i64, 8);
+#[cfg(not(feature = "std"))] num_datum!(i128, 16);
 
+#[cfg(not(feature = "std"))]
 impl Datum for bool {
-    fn datum(&self) -> Result<Vec<u8>> {
+    fn to_datum(&self) -> Result<Vec<u8>, Box<dyn StdError + Sync + Send>> {
         Ok(vec![*self as u8])
     }
+
+    fn from_datum(b: Vec<u8>) -> Result<Self, Box<dyn StdError + Sync + Send>> {
+        if b.len() != 1 {
+            bail!(Error::BadValue);
+        }
+        Ok(b[0] != 0)
+    }
 }
 
+#[cfg(not(feature = "std"))]
 impl Datum for f32 {
-    fn datum(&self) -> Result<Vec<u8>> {
+    fn to_datum(&self) -> Result<Vec<u8>, Box<dyn StdError + Sync + Send>> {
         let b = self.to_be_bytes();
         Ok(b.into())
     }
-}
 
-impl Datum for f64 {
-    fn datum(&self) -> Result<Vec<u8>> {
-        let b = self.to_be_bytes();
-        Ok(b.into())
-    }
-}
-
-/*******************************************************************************
- *                                                                             *
- * Fetcher implementation
- *                                                                             *
- *******************************************************************************/
-
-/// Internal trait to allow fetching of most primitive types.
-pub trait Fetcher<T> {
-    fn fetch(&mut self, key: impl Datum) -> Result<Option<T>>;
-}
-
-impl Fetcher<Vec<u8>> for Db {
-    fn fetch(&mut self, key: impl Datum) -> Result<Option<Vec<u8>>> {
-        let key = key.datum()?;
-        self._fetch(key.as_ref())
-    }
-}
-
-impl Fetcher<String> for Db {
-    fn fetch(&mut self, key: impl Datum) -> Result<Option<String>> {
-        let key = key.datum()?;
-        let v = self._fetch(key.as_ref())?;
-        match v {
-            Some(v) => Ok(Some(String::from_utf8(v)?)),
-            None    => Ok(None),
-        }
-    }
-}
-
-impl Fetcher<CString> for Db {
-    fn fetch(&mut self, key: impl Datum) -> Result<Option<CString>> {
-        let key = key.datum()?;
-        let v = self._fetch(key.as_ref())?;
-        match v {
-            Some(v) => Ok(Some(CString::new(v)?)),
-            None    => Ok(None),
-        }
-    }
-}
-
-impl Fetcher<u8> for Db {
-    fn fetch(&mut self, key: impl Datum) -> Result<Option<u8>> {
-        let key = key.datum()?;
-        let v = self._fetch(key.as_ref())?;
-        match v {
-            Some(v) if v.len() != 1 => bail!(Error::BadValue),
-            Some(v) => Ok(Some(v[0])),
-            None => Ok(None),
-        }
-    }
-}
-
-impl Fetcher<i8> for Db {
-    fn fetch(&mut self, key: impl Datum) -> Result<Option<i8>> {
-        let key = key.datum()?;
-        let v = self._fetch(key.as_ref())?;
-        match v {
-            Some(v) if v.len() != 1 => bail!(Error::BadValue),
-            Some(v) => Ok(Some(v[0] as i8)),
-            None => Ok(None),
-        }
-    }
-}
-
-macro_rules! num_fetcher {
-    ($type:ty, $n:expr) => {
-        impl Fetcher<$type> for Db {
-            fn fetch(&mut self, key: impl Datum) -> Result<Option<$type>> {
-                let key = key.datum()?;
-                let v = self._fetch(key.as_ref())?;
-                match v {
-                    Some(v) if v.len() != $n => bail!(Error::BadValue),
-                    Some(v) => {
-                        let mut num: $type = 0;
-                        for i in 1..=$n {
-                            num <<= 8;
-                            num |= v[$n-i] as $type;
-                        }
-                        Ok(Some(num))
-                    },
-                    None => Ok(None),
-                }
+    fn from_datum(b: Vec<u8>) -> Result<Self, Box<dyn StdError + Sync + Send>> {
+            if b.len() != 4 {
+                bail!(Error::BadValue);
             }
-        }
+            let mut arr = [0u8; 4];
+            arr.copy_from_slice(&b);
+            Ok(f32::from_be_bytes(arr))
     }
 }
 
-num_fetcher!(u16, 2);
-num_fetcher!(u32, 4);
-num_fetcher!(u64, 8);
-num_fetcher!(u128, 16);
-num_fetcher!(i16, 2);
-num_fetcher!(i32, 4);
-num_fetcher!(i64, 8);
-num_fetcher!(i128, 16);
-
-impl Fetcher<bool> for Db {
-    fn fetch(&mut self, key: impl Datum) -> Result<Option<bool>> {
-        let key = key.datum()?;
-        let v = self._fetch(key.as_ref())?;
-        match v {
-            Some(v) if v.len() != 1 => bail!(Error::BadValue),
-            Some(v) => Ok(Some(v[0] != 0)),
-            None => Ok(None),
-        }
+#[cfg(not(feature = "std"))]
+impl Datum for f64 {
+    fn to_datum(&self) -> Result<Vec<u8>, Box<dyn StdError + Sync + Send>> {
+        let b = self.to_be_bytes();
+        Ok(b.into())
     }
-}
 
-impl Fetcher<f32> for Db {
-    fn fetch(&mut self, key: impl Datum) -> Result<Option<f32>> {
-        let key = key.datum()?;
-        let v = self._fetch(key.as_ref())?;
-        match v {
-            Some(v) if v.len() != 4 => bail!(Error::BadValue),
-            Some(v) => {
-                let mut arr = [0u8; 4];
-                arr.copy_from_slice(&v);
-                Ok(Some(f32::from_be_bytes(arr)))
-            },
-            None => Ok(None),
-        }
-    }
-}
-
-impl Fetcher<f64> for Db {
-    fn fetch(&mut self, key: impl Datum) -> Result<Option<f64>> {
-        let key = key.datum()?;
-        let v = self._fetch(key.as_ref())?;
-        match v {
-            Some(v) if v.len() != 8 => bail!(Error::BadValue),
-            Some(v) => {
-                let mut arr = [0u8; 8];
-                arr.copy_from_slice(&v);
-                Ok(Some(f64::from_be_bytes(arr)))
-            },
-            None => Ok(None),
-        }
+    fn from_datum(b: Vec<u8>) -> Result<Self, Box<dyn StdError + Sync + Send>> {
+            if b.len() != 8 {
+                bail!(Error::BadValue);
+            }
+            let mut arr = [0u8; 8];
+            arr.copy_from_slice(&b);
+            Ok(f64::from_be_bytes(arr))
     }
 }
 
@@ -1223,7 +1115,7 @@ mod tests {
         for (key, val) in &map {
             let key = l2b(*key);
             // println!("{} - {}", key.len(), val.len());
-            db.store(key, val).expect("error on store");
+            db.store(key, val.clone()).expect("error on store");
         }
 
         // Check content
@@ -1259,109 +1151,109 @@ mod tests {
         // assert!(db.is_empty().expect("error is_empty"));
 
         // Fetcher and Datum
-        let key = "testkey";
+        let key = "testkey".to_owned();
 
         let val: Vec<u8> = vec![0, 1, 2, 3];
-        db.store(key, &val).expect("storing Vec<u8>");
-        let res: Vec<u8> = db.fetch(key)
+        db.store(key.clone(), val.clone()).expect("storing Vec<u8>");
+        let res: Vec<u8> = db.fetch(key.clone())
             .expect("error fetching Vec<u8>")
             .expect("none fetching Vec<u8>");
         assert_eq!(val, res);
 
         let val: u8 = 42;
-        db.store(key, val).expect("storing u8");
-        let res: u8 = db.fetch(key)
+        db.store(key.clone(), val.clone()).expect("storing u8");
+        let res: u8 = db.fetch(key.clone())
             .expect("error fetching u8")
             .expect("none fetching u8");
         assert_eq!(val, res);
 
         let val: u16 = 42;
-        db.store(key, val).expect("storing u16");
-        let res: u16 = db.fetch(key)
+        db.store(key.clone(), val.clone()).expect("storing u16");
+        let res: u16 = db.fetch(key.clone())
             .expect("error fetching u16")
             .expect("none fetching u16");
         assert_eq!(val, res);
 
         let val: u32 = 42;
-        db.store(key, val).expect("storing u32");
-        let res: u32 = db.fetch(key)
+        db.store(key.clone(), val.clone()).expect("storing u32");
+        let res: u32 = db.fetch(key.clone())
             .expect("error fetching u32")
             .expect("none fetching u32");
         assert_eq!(val, res);
 
         let val: u64 = 42;
-        db.store(key, val).expect("storing u64");
-        let res: u64 = db.fetch(key)
+        db.store(key.clone(), val.clone()).expect("storing u64");
+        let res: u64 = db.fetch(key.clone())
             .expect("error fetching u64")
             .expect("none fetching u64");
         assert_eq!(val, res);
 
         let val: u128 = 42;
-        db.store(key, val).expect("storing u128");
-        let res: u128 = db.fetch(key)
+        db.store(key.clone(), val.clone()).expect("storing u128");
+        let res: u128 = db.fetch(key.clone())
             .expect("error fetching u128")
             .expect("none fetching u128");
         assert_eq!(val, res);
 
         let val: i8 = -42;
-        db.store(key, val).expect("storing i8");
-        let res: i8 = db.fetch(key)
+        db.store(key.clone(), val.clone()).expect("storing i8");
+        let res: i8 = db.fetch(key.clone())
             .expect("error fetching i8")
             .expect("none fetching i8");
         assert_eq!(val, res);
 
         let val: i16 = -42;
-        db.store(key, val).expect("storing i16");
-        let res: i16 = db.fetch(key)
+        db.store(key.clone(), val.clone()).expect("storing i16");
+        let res: i16 = db.fetch(key.clone())
             .expect("error fetching i16")
             .expect("none fetching i16");
         assert_eq!(val, res);
 
         let val: i32 = -42;
-        db.store(key, val).expect("storing i32");
-        let res: i32 = db.fetch(key)
+        db.store(key.clone(), val.clone()).expect("storing i32");
+        let res: i32 = db.fetch(key.clone())
             .expect("error fetching i32")
             .expect("none fetching i32");
         assert_eq!(val, res);
 
         let val: i64 = -42;
-        db.store(key, val).expect("storing i64");
-        let res: i64 = db.fetch(key)
+        db.store(key.clone(), val.clone()).expect("storing i64");
+        let res: i64 = db.fetch(key.clone())
             .expect("error fetching i64")
             .expect("none fetching i64");
         assert_eq!(val, res);
 
         let val: i128 = -42;
-        db.store(key, val).expect("storing i128");
-        let res: i128 = db.fetch(key)
+        db.store(key.clone(), val.clone()).expect("storing i128");
+        let res: i128 = db.fetch(key.clone())
             .expect("error fetching i128")
             .expect("none fetching i128");
         assert_eq!(val, res);
 
-        let val: &str = "Hello World";
-        db.store(key, &val).expect("storing String");
-        let res: String = db.fetch(key)
+        let val: String = "Hello World".to_owned();
+        db.store(key.clone(), val.clone()).expect("storing String");
+        let res: String = db.fetch(key.clone())
             .expect("error fetching String")
             .expect("none fetching String");
         assert_eq!(val, res);
 
         let val: bool = true;
-        db.store(key, val).expect("storing bool");
-        let res: bool = db.fetch(key)
+        db.store(key.clone(), val.clone()).expect("storing bool");
+        let res: bool = db.fetch(key.clone())
             .expect("error fetching bool")
             .expect("none fetching bool");
         assert_eq!(val, res);
 
         let val: f32 = 42.31415;
-        db.store(key, val).expect("storing f32");
-        let res: f32 = db.fetch(key)
+        db.store(key.clone(), val.clone()).expect("storing f32");
+        let res: f32 = db.fetch(key.clone())
             .expect("error fetching f32")
             .expect("none fetching f32");
         assert_eq!(val, res);
 
         let val: f64 = -42.16180;
-        db.store(key, val).expect("storing f64");
-        let res: f64 = db.fetch(key)
+        db.store(key.clone(), val.clone()).expect("storing f64");
+        let res: f64 = db.fetch(key.clone())
             .expect("error fetching f64")
             .expect("none fetching f64");
         assert_eq!(val, res);
